@@ -1,25 +1,127 @@
 import pandas as pd
+import numpy as np
+import re
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from scipy import sparse
+import joblib
 import os
+import time
 
-def load_and_clean_data():
-    print("Loading raw RACE data...")
-    train_df = pd.read_csv('data/raw/train.csv')
-    val_df = pd.read_csv('data/raw/val.csv')
-    test_df = pd.read_csv('data/raw/test.csv')
+class RacePreprocessor:
+    def __init__(self, max_features=5000):
+        # Using CountVectorizer with binary=True creates the required One-Hot Encoding
+        self.ohe_vectorizer = CountVectorizer(binary=True, max_features=max_features, stop_words='english')
+        # Using TF-IDF Vectorizer
+        self.tfidf_vectorizer = TfidfVectorizer(max_features=max_features, stop_words='english')
+        
+    def _clean_text_node(self, text):
+        """Applies lowercasing and punctuation removal."""
+        if not isinstance(text, str):
+            return ""
+        text = text.lower()
+        text = re.sub(r'[^\w\s]', '', text)
+        return text
 
-    print("Cleaning text data...")
-    train_df['article'] = train_df['article'].fillna('').str.lower()
-    val_df['article'] = val_df['article'].fillna('').str.lower()
-    test_df['article'] = test_df['article'].fillna('').str.lower()
+    def clean_corpus(self, df):
+        """Iterates through and cleans all relevant text columns in the DataFrame."""
+        clean_df = df.copy()
+        text_columns = ['article', 'question', 'A', 'B', 'C', 'D']
+        for col in text_columns:
+            if col in clean_df.columns:
+                clean_df[col] = clean_df[col].apply(self._clean_text_node)
+            else:
+                clean_df[col] = "" # Fill missing option columns if any
+        
+        # Fill NA answers just in case
+        if 'answer' not in clean_df.columns:
+            clean_df['answer'] = 'A'
+            
+        return clean_df
 
+    def compute_lexical_features(self, df):
+        """Computes handcrafted lexical features for the DataFrame."""
+        features = pd.DataFrame(index=df.index)
+        
+        features['article_len'] = df['article'].apply(lambda x: len(str(x).split()))
+        features['question_len'] = df['question'].apply(lambda x: len(str(x).split()))
+        
+        # Word overlap between question and article
+        def overlap(row):
+            q_words = set(str(row['question']).split())
+            a_words = set(str(row['article']).split())
+            if not q_words:
+                return 0
+            return len(q_words.intersection(a_words)) / len(q_words)
+            
+        features['q_article_overlap'] = df.apply(overlap, axis=1)
+        
+        return features.values
 
-    print("Saving processed data to data/processed/ ...")
-    train_df.to_csv('data/processed/train_clean.csv', index=False)
-    val_df.to_csv('data/processed/val_clean.csv', index=False)
-    test_df.to_csv('data/processed/test_clean.csv', index=False)
-    
-    print("Preprocessing complete!")
+    def build_features(self, df, is_training=False, split_name='train'):
+        """Combines text and applies One-Hot Encoding, TF-IDF, and extracts features."""
+        print(f"Building features for {split_name}...")
+        combined_text = df['article'] + " " + df['question'] + " " + \
+                        df['A'] + " " + df['B'] + " " + df['C'] + " " + df['D']
+        
+        # 1. OHE and TF-IDF
+        if is_training:
+            os.makedirs('models', exist_ok=True)
+            ohe_matrix = self.ohe_vectorizer.fit_transform(combined_text)
+            joblib.dump(self.ohe_vectorizer, 'models/ohe_vectorizer.pkl') 
+            
+            tfidf_matrix = self.tfidf_vectorizer.fit_transform(combined_text)
+            joblib.dump(self.tfidf_vectorizer, 'models/tfidf_vectorizer.pkl')
+        else:
+            ohe_matrix = self.ohe_vectorizer.transform(combined_text)
+            tfidf_matrix = self.tfidf_vectorizer.transform(combined_text)
+            
+        # 2. Handcrafted features
+        lexical_matrix = self.compute_lexical_features(df)
+        
+        return ohe_matrix, tfidf_matrix, lexical_matrix
+
+    def process_and_save(self, input_path, output_dir, split_name, is_training=False):
+        """Full pipeline execution from raw to processed."""
+        if not os.path.exists(input_path):
+            print(f"Warning: {input_path} does not exist. Skipping.")
+            return None
+            
+        raw_df = pd.read_csv(input_path)
+        clean_df = self.clean_corpus(raw_df)
+        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Save cleaned text data
+        clean_csv_path = os.path.join(output_dir, f'{split_name}_clean.csv')
+        clean_df.to_csv(clean_csv_path, index=False)
+        
+        # Generate matrices
+        ohe_matrix, tfidf_matrix, lexical_matrix = self.build_features(clean_df, is_training, split_name)
+        
+        # Save matrices
+        sparse.save_npz(os.path.join(output_dir, f'{split_name}_ohe.npz'), ohe_matrix)
+        sparse.save_npz(os.path.join(output_dir, f'{split_name}_tfidf.npz'), tfidf_matrix)
+        np.save(os.path.join(output_dir, f'{split_name}_lexical.npy'), lexical_matrix)
+        
+        if 'answer' in clean_df.columns:
+            np.save(os.path.join(output_dir, f'{split_name}_labels.npy'), clean_df['answer'].values)
+            
+        print(f"[{split_name}] Processed {input_path} -> Saved to {output_dir}")
+        print(f"[{split_name}] OHE matrix shape: {ohe_matrix.shape}")
+        
+        return clean_df, ohe_matrix, tfidf_matrix, lexical_matrix
 
 if __name__ == "__main__":
-    load_and_clean_data()
+    start_time = time.time()
+    processor = RacePreprocessor(max_features=5000) 
     
+    # Process Train
+    processor.process_and_save('data/raw/train.csv', 'data/processed', 'train', is_training=True)
+    
+    # Process Val
+    processor.process_and_save('data/raw/val.csv', 'data/processed', 'val', is_training=False)
+    
+    # Process Test
+    processor.process_and_save('data/raw/test.csv', 'data/processed', 'test', is_training=False)
+    
+    print(f"Preprocessing completed in {time.time() - start_time:.2f} seconds.")
