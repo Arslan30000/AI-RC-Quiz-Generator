@@ -80,14 +80,9 @@ class RacePreprocessor:
         
         return ohe_matrix, tfidf_matrix, lexical_matrix
 
-    def process_and_save(self, input_path, output_dir, split_name, is_training=False):
+    def process_and_save(self, input_df, output_dir, split_name, is_training=False):
         """Full pipeline execution from raw to processed."""
-        if not os.path.exists(input_path):
-            print(f"Warning: {input_path} does not exist. Skipping.")
-            return None
-            
-        raw_df = pd.read_csv(input_path)
-        clean_df = self.clean_corpus(raw_df)
+        clean_df = self.clean_corpus(input_df)
         
         os.makedirs(output_dir, exist_ok=True)
         
@@ -106,22 +101,33 @@ class RacePreprocessor:
         if 'answer' in clean_df.columns:
             np.save(os.path.join(output_dir, f'{split_name}_labels.npy'), clean_df['answer'].values)
             
-        print(f"[{split_name}] Processed {input_path} -> Saved to {output_dir}")
+        print(f"[{split_name}] Processed {len(input_df)} rows -> Saved to {output_dir}")
         print(f"[{split_name}] OHE matrix shape: {ohe_matrix.shape}")
         
         return clean_df, ohe_matrix, tfidf_matrix, lexical_matrix
 
 if __name__ == "__main__":
+    from sklearn.model_selection import train_test_split
+    
     start_time = time.time()
     processor = RacePreprocessor(max_features=5000) 
     
+    print("Loading original train.csv for 80/10/10 split...")
+    full_df = pd.read_csv('data/raw/train.csv')
+    
+    # 80/10/10 Split
+    train_df, temp_df = train_test_split(full_df, test_size=0.20, random_state=42)
+    val_df, test_df = train_test_split(temp_df, test_size=0.50, random_state=42)
+    
+    print(f"Split sizes -> Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
+    
     # Process Train
-    processor.process_and_save('data/raw/train.csv', 'data/processed', 'train', is_training=True)
+    processor.process_and_save(train_df, 'data/processed', 'train', is_training=True)
     
     # Process Val
-    processor.process_and_save('data/raw/val.csv', 'data/processed', 'val', is_training=False)
+    processor.process_and_save(val_df, 'data/processed', 'val', is_training=False)
     
     # Process Test
-    processor.process_and_save('data/raw/test.csv', 'data/processed', 'test', is_training=False)
+    processor.process_and_save(test_df, 'data/processed', 'test', is_training=False)
     
     print(f"Preprocessing completed in {time.time() - start_time:.2f} seconds.")
